@@ -1,0 +1,163 @@
+---
+title: "Untargeted Metabolomics Analysis Report"
+author: "Akila Wijerathna-Yapa"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Load Libraries
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(RColorBrewer)
+library(ggrepel)
+library(pheatmap)
+library(ComplexUpset)
+```
+
+## Load and Prepare Data
+
+```{r}
+df_combined <- read.csv("Data/df_combined_POS_NEG.csv")
+Met_Category <- read.csv("Data/HMDB_metabolites.csv")
+
+df_combined <- df_combined %>% select(-X)
+
+df_combined <- df_combined %>%
+  mutate(Metabolite.name = str_trim(str_remove(Metabolite.name, ";.*"))) %>%
+  mutate(Metabolite.name = case_when(
+    Metabolite.name == "Inosine-5-monophosphate" ~ "Inosine-5'-monophosphate",
+    Metabolite.name == "2'-Deoxyadenosine-5'-monophosphate" ~ "2'-Deoxyadenosine 5'-monophosphate",
+    Metabolite.name == "(-)-Riboflavin" ~ "Riboflavin",
+    Metabolite.name == "D-(+)-Pantothenic Acid" ~ "Pantothenic acid",
+    Metabolite.name == "2'-Deoxyadenosine-5'-Monophosphate" ~ "2'-Deoxyadenosine 5'-Monophosphate",
+    Metabolite.name == "Aconitic Acid (Not Validated, Isomer Of 271)" ~ "Aconitic Acid",
+    Metabolite.name == "Adenosine-3-Monophosphate" ~ "Adenosine 3'-Monophosphate",
+    Metabolite.name == "Azelaic Acid (Not Validated)" ~ "Azelaic Acid",
+    Metabolite.name == "Citric Acid (Not Validated, Isomer Of 227)" ~ "Citric Acid",
+    Metabolite.name == "Flavin??Adenine??Dinucleotide" ~ "Flavin Adenine Dinucleotide",
+    Metabolite.name == "Inosine-5-Monophosphate" ~ "Inosine-5'-Monophosphate",
+    Metabolite.name == "Isoleucine (Not Validated)" ~ "Isoleucine",
+    Metabolite.name == "Xanthosine (Not Validated)" ~ "Xanthosine",
+    TRUE ~ Metabolite.name
+  ))
+```
+
+## Annotate and Normalize
+
+```{r}
+df_filtered <- df_combined %>% select(-Adduct.type, -Average.Rt.min.)
+
+df_avg <- df_filtered %>%
+  group_by(Metabolite.name) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE), .groups = "drop")
+
+join_with_category <- function(df_avg, met_category_df,
+                               avg_col = "Metabolite.name", cat_col = "Metabolite") {
+  df_avg <- df_avg %>% mutate(join_key = tolower(str_trim(!!sym(avg_col))))
+  met_category_df <- met_category_df %>% mutate(join_key = tolower(str_trim(!!sym(cat_col))))
+  df_avg %>% left_join(met_category_df %>% select(join_key, Category), by = "join_key") %>% select(-join_key)
+}
+
+df_avg <- join_with_category(df_avg, Met_Category)
+```
+
+## PCA Plot
+
+```{r}
+df_avg_scaled_matrix <- df_avg %>% select(-Metabolite.name, -Category) %>% t() %>% as.data.frame()
+pca_result <- prcomp(df_avg_scaled_matrix, center = FALSE, scale. = FALSE)
+
+df_pca_plot <- as.data.frame(pca_result$x[, 1:2])
+df_pca_plot$Group <- sapply(rownames(df_pca_plot), function(x) strsplit(x, "_")[[1]][1])
+df_pca_plot$Sample <- rownames(df_pca_plot)
+
+pca_colors <- c("#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#9467BD", "#8C564B", "#E377C2", "#7F7F7F", "#BCBD22")
+group_color_map <- setNames(pca_colors, unique(df_pca_plot$Group))
+
+explained_var <- pca_result$sdev^2 / sum(pca_result$sdev^2)
+pc1_var <- round(explained_var[1] * 100, 2)
+pc2_var <- round(explained_var[2] * 100, 2)
+
+ggplot(df_pca_plot, aes(x = PC1, y = PC2, color = Group, label = Sample)) +
+  geom_point(size = 4) +
+  geom_text_repel(size = 3) +
+  scale_color_manual(values = group_color_map) +
+  labs(title = "PCA Plot", x = paste0("PC1 (", pc1_var, "%)"), y = paste0("PC2 (", pc2_var, "%)")) +
+  theme_minimal()
+```
+
+## PCA Loading Plot
+
+```{r}
+loadings <- as.data.frame(pca_result$rotation[, 1:2])
+loadings$Metabolite.name <- df_avg$Metabolite.name
+loadings$Category <- df_avg$Category
+
+ggplot(loadings, aes(x = PC1, y = PC2, color = Category)) +
+  geom_point(size = 3, alpha = 0.8) +
+  scale_color_brewer(palette = "Set3") +
+  labs(title = "PCA Loadings", x = paste0("PC1 Loadings (", pc1_var, "%)"), y = paste0("PC2 Loadings (", pc2_var, "%)")) +
+  theme_minimal()
+```
+
+## Heatmap
+
+```{r}
+m.int <- df_avg %>% select(-Metabolite.name, -Category) %>% as.matrix()
+rownames(m.int) <- df_avg$Metabolite.name
+
+row_annotation <- data.frame(Category = df_avg$Category)
+rownames(row_annotation) <- rownames(m.int)
+
+col_cat2 <- list(Category = setNames(brewer.pal(n = length(unique(df_avg$Category)), "Set3"), unique(df_avg$Category)))
+
+pheatmap(m.int,
+         scale = "row",
+         show_rownames = FALSE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         color = colorRampPalette(c("navy", "white", "#E31A1C"))(50),
+         annotation_row = row_annotation,
+         annotation_colors = col_cat2)
+```
+
+## UpSet Plot
+
+```{r}
+df_long <- df_avg %>%
+  pivot_longer(cols = -c(Metabolite.name, Category), names_to = "Sample", values_to = "Intensity") %>%
+  mutate(Group = str_extract(Sample, ".*(?=_[0-9]+$)"))
+
+df_group_avg <- df_long %>%
+  group_by(Group, Metabolite.name, Category) %>%
+  summarise(Mean_Intensity = mean(Intensity, na.rm = TRUE), .groups = "drop")
+
+top50_metabolites <- df_group_avg %>%
+  group_by(Group) %>%
+  slice_max(order_by = Mean_Intensity, n = 50) %>%
+  ungroup()
+
+upset_data <- top50_metabolites %>%
+  select(Group, Metabolite.name) %>%
+  mutate(value = 1) %>%
+  pivot_wider(names_from = Group, values_from = value, values_fill = 0)
+
+ComplexUpset::upset(
+  data = upset_data,
+  intersect = names(upset_data)[-1],
+  name = "Top 50 Metabolites",
+  base_annotations = list('Intersection size' = intersection_size(text = list(size = 3))),
+  width_ratio = 0.2
+)
+```
